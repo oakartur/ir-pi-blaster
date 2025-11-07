@@ -305,8 +305,8 @@ bool ensure_backend_loaded()
 // ===================== CONFIG GLOBAIS =====================
 
 // Sugeridos: TX=18 (PWM0), RX=23. Você pode mudar.
-static int GPIO_TX = 18;
-static int GPIO_RX = 23;
+static int GPIO_TX = 23;
+static int GPIO_RX = 14;
 static int GPIO_BTN = 17;
 
 // Modo de execução
@@ -945,3 +945,4 @@ int main(int argc, char** argv)
     gpioTerminate();
     return 0;
 }
+
