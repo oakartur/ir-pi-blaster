@@ -1,2 +1,3 @@
-pigpio>=1.78
-# The Raspberry Pi 5 uses the system-provided python3-lgpio package instead of pigpio.
+# The tools in this repository only depend on the Python standard library.
+# Hardware-specific GPIO libraries such as pigpio and lgpio are installed via
+# the operating system packages recommended in the README.
