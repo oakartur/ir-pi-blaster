@@ -67,31 +67,43 @@ static BackendApi g_backend;
 static bool g_backend_loaded = false;
 static std::string g_backend_error;
 
-template<typename T>
-bool load_symbol(void* handle, T& target, const char* name, std::string& err)
-{
-    dlerror();
-    void* sym = dlsym(handle, name);
-    if (!sym) {
-        err = std::string("Simbolo ausente: ") + name;
-        if (const char* detail = dlerror()) {
-            err += " (";
-            err += detail;
-            err += ')';
-        }
-        return false;
-    }
-    target = reinterpret_cast<T>(sym);
-    return true;
+// ---- helpers ----
+static inline std::string to_lower(const std::string& s) {
+    std::string out = s;
+    std::transform(out.begin(), out.end(), out.begin(),
+                   [](unsigned char c){ return std::tolower(c); });
+    return out;
 }
 
-void unload_backend()
-{
-    if (g_backend.handle) {
-        dlclose(g_backend.handle);
-        g_backend = BackendApi{};
+static std::optional<std::string> detect_pi_model() {
+    const char* override = std::getenv(kEnvModelOverride);
+    if (override && *override) return std::string(override);
+
+    const std::array<const char*, 2> paths = {
+        "/sys/firmware/devicetree/base/model",
+        "/proc/device-tree/model"
+    };
+    for (const auto& path : paths) {
+        std::ifstream f(path, std::ios::binary);
+        if (!f.good()) continue;
+        std::ostringstream ss;
+        ss << f.rdbuf();
+        std::string model = ss.str();
+        model.erase(std::remove(model.begin(), model.end(), '\0'), model.end());
+        if (!model.empty()) return model;
     }
-    g_backend_loaded = false;
+    return std::nullopt;
+}
+
+static std::optional<int> parse_pi_version(const std::optional<std::string>& model) {
+    if (!model) return std::nullopt;
+    std::regex re(R"(Raspberry Pi\s*(?:Model\s*)?(\d+))", std::regex::icase);
+    std::smatch m;
+    if (std::regex_search(*model, m, re)) {
+        try { return std::stoi(m[1].str()); }
+        catch (...) { return std::nullopt; }
+    }
+    return std::nullopt;
 }
 
 // ===================== GPIO backend loading (robusto) =====================
@@ -101,26 +113,19 @@ bool load_backend_library(const std::string& lib_name_input)
     unload_backend();
     g_backend_error.clear();
 
-    // nome base sem espaços e minusculo
-    std::string lib_name = lib_name_input;
-    std::transform(lib_name.begin(), lib_name.end(), lib_name.begin(),
-                   [](unsigned char c){ return std::tolower(c); });
+    std::string lib_name = to_lower(lib_name_input);
 
-    // lista de caminhos candidatos
     std::vector<std::string> candidates;
 
-    // se o nome contiver '/', use diretamente
     if (lib_name.find('/') != std::string::npos) {
         candidates.push_back(lib_name);
     } else {
-        // nomes genéricos
         candidates.push_back("lib" + lib_name + ".so");
         candidates.push_back("lib" + lib_name + ".so.0");
         candidates.push_back("lib" + lib_name + ".so.1");
         candidates.push_back(lib_name + ".so");
         candidates.push_back(lib_name);
 
-        // caminhos absolutos comuns em Raspberry Pi OS / Debian
         std::vector<std::string> search_dirs = {
             "/usr/lib/aarch64-linux-gnu/",
             "/lib/aarch64-linux-gnu/",
@@ -138,7 +143,6 @@ bool load_backend_library(const std::string& lib_name_input)
         }
     }
 
-    // tentar carregar uma a uma
     const char* last_error = nullptr;
     for (const auto& candidate : candidates) {
         dlerror();
@@ -172,7 +176,7 @@ bool load_backend_library(const std::string& lib_name_input)
         return true;
     };
 
-    // tenta carregar todos os símbolos da API pigpio
+    // tenta carregar símbolos pigpio
     if (!require(g_backend.gpioInitialise,    "gpioInitialise")) return false;
     if (!require(g_backend.gpioTerminate,     "gpioTerminate"))  return false;
     if (!require(g_backend.gpioSetMode,       "gpioSetMode"))    return false;
@@ -198,54 +202,18 @@ bool load_backend_library(const std::string& lib_name_input)
 std::string select_gpio_library()
 {
     const char* forced = std::getenv(kEnvForceLib);
-    if (forced && std::strlen(forced) > 0) {
+    if (forced && std::strlen(forced) > 0)
         return to_lower(forced);
-    }
 
     auto model = detect_pi_model();
     auto version = parse_pi_version(model);
-    if (version && *version >= 5) {
+    if (version && *version >= 5)
         return "lgpio";
-    }
     return "pigpio";
 }
 
-bool ensure_backend_loaded()
-{
-    if (g_backend_loaded)
-        return true;
+} //namespace
 
-    // força de ambiente (usada apenas se existir E acessível)
-    std::string forced_lib;
-    if (const char* env_force = std::getenv("IR_PI_FORCE_LIB")) {
-        forced_lib = env_force;
-    }
-
-    // auto-detecção
-    std::string selected = select_gpio_library();
-
-    // tenta em ordem de prioridade:
-    // 1. caminho forçado (se existir)
-    // 2. biblioteca detectada
-    // 3. fallback pigpio
-    std::vector<std::string> trials;
-    if (!forced_lib.empty()) trials.push_back(forced_lib);
-    trials.push_back(selected);
-    if (selected != "pigpio") trials.push_back("pigpio");
-
-    for (const auto& lib : trials) {
-        std::fprintf(stderr, "[GPIO] Tentando carregar: %s\n", lib.c_str());
-        if (load_backend_library(lib)) {
-            return true;
-        } else {
-            std::fprintf(stderr, "[GPIO] Falha: %s\n", g_backend_error.c_str());
-        }
-    }
-
-    return false;
-}
-
-} // namespace
 
 #define PI_INPUT   0
 #define PI_OUTPUT  1
@@ -915,6 +883,7 @@ int main(int argc, char** argv)
     gpioTerminate();
     return 0;
 }
+
 
 
 
