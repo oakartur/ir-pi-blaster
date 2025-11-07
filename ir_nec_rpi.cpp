@@ -729,6 +729,61 @@ static void button_start(){
     std::printf("Botao de TX em GPIO %d (pull-up interno, para GND). NUNCA use 5V no GPIO.\n", GPIO_BTN);
 }
 
+// ===================== Backend loader utils =====================
+
+static void unload_backend()
+{
+    if (g_backend.handle) {
+        dlclose(g_backend.handle);
+        g_backend.handle = nullptr;
+    }
+    g_backend_loaded = false;
+}
+
+template<typename T>
+static bool load_symbol(void* handle, T& fn, const char* name, std::string& err)
+{
+    fn = reinterpret_cast<T>(dlsym(handle, name));
+    if (!fn) {
+        const char* e = dlerror();
+        err = std::string("Símbolo ausente: ") + name +
+              (e ? std::string(" (") + e + ")" : "");
+        return false;
+    }
+    return true;
+}
+
+// Tenta carregar a biblioteca certa, com fallback automático
+static bool ensure_backend_loaded()
+{
+    if (g_backend_loaded)
+        return true;
+
+    std::string selected = select_gpio_library();
+
+    // tenta caminho forçado via env, detectado e fallback pigpio
+    std::vector<std::string> tries;
+    if (const char* env = std::getenv("IR_PI_FORCE_LIB"); env && *env)
+        tries.push_back(env);
+    tries.push_back(selected);
+    if (selected != "pigpio")
+        tries.push_back("pigpio");
+
+    for (const auto& lib : tries) {
+        std::fprintf(stderr, "[GPIO] Tentando carregar backend: %s\n", lib.c_str());
+        if (load_backend_library(lib)) {
+            std::fprintf(stderr, "[GPIO] Backend ativo: %s\n",
+                         g_backend.resolved_name.c_str());
+            return true;
+        } else {
+            std::fprintf(stderr, "[GPIO] Falha: %s\n", g_backend_error.c_str());
+        }
+    }
+
+    return false;
+}
+
+
 // ===================== MAIN =====================
 int main(int argc, char** argv)
 {
@@ -883,6 +938,7 @@ int main(int argc, char** argv)
     gpioTerminate();
     return 0;
 }
+
 
 
 
