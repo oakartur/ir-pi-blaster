@@ -195,7 +195,20 @@ bool load_backend_library(const std::string& lib_name_input)
     return true;
 }
 
-std::string select_gpio_library();
+std::string select_gpio_library()
+{
+    const char* forced = std::getenv(kEnvForceLib);
+    if (forced && std::strlen(forced) > 0) {
+        return to_lower(forced);
+    }
+
+    auto model = detect_pi_model();
+    auto version = parse_pi_version(model);
+    if (version && *version >= 5) {
+        return "lgpio";
+    }
+    return "pigpio";
+}
 
 bool ensure_backend_loaded()
 {
@@ -902,6 +915,7 @@ int main(int argc, char** argv)
     gpioTerminate();
     return 0;
 }
+
 
 
 
