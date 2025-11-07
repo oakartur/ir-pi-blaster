@@ -1,9 +1,9 @@
 // - TX: envia NECx (addr16=0x0707, cmd=0x02), portadora 38 kHz, duty ~33%
 // - RX: decodifica NEC/NECx de um TSOP (ativo-baixo), imprime raw/addr/cmd
-// Build: g++ -std=gnu++17 ir_nec_rpi.cpp -lpigpio -lpthread -O2 -o ir_nec_rpi
+// Build: g++ -std=gnu++17 ir_nec_rpi.cpp -ldl -lpthread -O2 -o ir_nec_rpi
 // Run:   sudo ./ir_nec_rpi --mode=rx|tx|all [--payload=0xFD020707]
 
-#include <pigpio.h>
+#include <dlfcn.h>
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
@@ -14,12 +14,293 @@
 #include <thread>
 #include <atomic>
 #include <string>
+#include <cctype>
 #include <chrono>
 #include <algorithm>
 #include <mutex>
 #include <condition_variable>
 #include <fstream>
 #include <sstream>
+#include <optional>
+#include <regex>
+#include <array>
+
+// ===================== GPIO backend selection =====================
+
+namespace {
+
+constexpr const char* kEnvModelOverride = "IR_PI_MODEL_OVERRIDE";
+constexpr const char* kEnvForceLib      = "IR_PI_FORCE_LIB";
+
+using gpioAlertFunc_t    = void (*)(int, int, uint32_t);
+using gpioTimerFuncEx_t  = void (*)(void*);
+
+struct gpioPulse_t {
+    uint32_t gpioOn;
+    uint32_t gpioOff;
+    uint32_t usDelay;
+};
+
+struct BackendApi {
+    void* handle = nullptr;
+    std::string resolved_name;
+
+    int  (*gpioInitialise)(void) = nullptr;
+    void (*gpioTerminate)(void)  = nullptr;
+    int  (*gpioSetMode)(unsigned, unsigned) = nullptr;
+    int  (*gpioWrite)(unsigned, unsigned) = nullptr;
+    uint32_t (*gpioTick)(void) = nullptr;
+    void (*gpioDelay)(unsigned) = nullptr;
+    int  (*gpioWaveAddNew)(void) = nullptr;
+    int  (*gpioWaveAddGeneric)(unsigned, gpioPulse_t*) = nullptr;
+    int  (*gpioWaveCreate)(void) = nullptr;
+    int  (*gpioWaveTxSend)(unsigned, unsigned) = nullptr;
+    int  (*gpioWaveTxBusy)(void) = nullptr;
+    int  (*gpioWaveDelete)(unsigned) = nullptr;
+    int  (*gpioSetPullUpDown)(unsigned, unsigned) = nullptr;
+    int  (*gpioSetAlertFunc)(unsigned, gpioAlertFunc_t) = nullptr;
+    int  (*gpioSetTimerFuncEx)(unsigned, unsigned, gpioTimerFuncEx_t, void*) = nullptr;
+    int  (*gpioGlitchFilter)(unsigned, unsigned) = nullptr;
+};
+
+static BackendApi g_backend;
+static bool g_backend_loaded = false;
+static std::string g_backend_error;
+
+template<typename T>
+bool load_symbol(void* handle, T& target, const char* name, std::string& err)
+{
+    dlerror();
+    void* sym = dlsym(handle, name);
+    if (!sym) {
+        err = std::string("Simbolo ausente: ") + name;
+        if (const char* detail = dlerror()) {
+            err += " (";
+            err += detail;
+            err += ')';
+        }
+        return false;
+    }
+    target = reinterpret_cast<T>(sym);
+    return true;
+}
+
+void unload_backend()
+{
+    if (g_backend.handle) {
+        dlclose(g_backend.handle);
+        g_backend = BackendApi{};
+    }
+    g_backend_loaded = false;
+}
+
+bool load_backend_library(const std::string& lib_name)
+{
+    unload_backend();
+    g_backend_error.clear();
+
+    std::vector<std::string> candidates;
+    if (lib_name.find('/') != std::string::npos) {
+        candidates.push_back(lib_name);
+    } else {
+        candidates.push_back("lib" + lib_name + ".so");
+        candidates.push_back("lib" + lib_name + ".so.1");
+        candidates.push_back(lib_name + ".so");
+        candidates.push_back(lib_name);
+    }
+
+    for (const auto& candidate : candidates) {
+        dlerror();
+        g_backend.handle = dlopen(candidate.c_str(), RTLD_LAZY | RTLD_LOCAL);
+        if (g_backend.handle) {
+            g_backend.resolved_name = candidate;
+            break;
+        }
+    }
+
+    if (!g_backend.handle) {
+        g_backend_error = "Falha ao carregar biblioteca GPIO '" + lib_name + "'";
+        if (const char* detail = dlerror()) {
+            g_backend_error += ": ";
+            g_backend_error += detail;
+        }
+        return false;
+    }
+
+    auto require = [&](auto& fn, const char* symbol) {
+        if (!load_symbol(g_backend.handle, fn, symbol, g_backend_error)) {
+            unload_backend();
+            return false;
+        }
+        return true;
+    };
+
+    if (!require(g_backend.gpioInitialise,    "gpioInitialise")) return false;
+    if (!require(g_backend.gpioTerminate,     "gpioTerminate"))  return false;
+    if (!require(g_backend.gpioSetMode,       "gpioSetMode"))    return false;
+    if (!require(g_backend.gpioWrite,         "gpioWrite"))      return false;
+    if (!require(g_backend.gpioTick,          "gpioTick"))       return false;
+    if (!require(g_backend.gpioDelay,         "gpioDelay"))      return false;
+    if (!require(g_backend.gpioWaveAddNew,    "gpioWaveAddNew")) return false;
+    if (!require(g_backend.gpioWaveAddGeneric,"gpioWaveAddGeneric")) return false;
+    if (!require(g_backend.gpioWaveCreate,    "gpioWaveCreate")) return false;
+    if (!require(g_backend.gpioWaveTxSend,    "gpioWaveTxSend")) return false;
+    if (!require(g_backend.gpioWaveTxBusy,    "gpioWaveTxBusy")) return false;
+    if (!require(g_backend.gpioWaveDelete,    "gpioWaveDelete")) return false;
+    if (!require(g_backend.gpioSetPullUpDown, "gpioSetPullUpDown")) return false;
+    if (!require(g_backend.gpioSetAlertFunc,  "gpioSetAlertFunc"))  return false;
+    if (!require(g_backend.gpioSetTimerFuncEx,"gpioSetTimerFuncEx")) return false;
+    if (!require(g_backend.gpioGlitchFilter,  "gpioGlitchFilter"))  return false;
+
+    g_backend_loaded = true;
+    g_backend_error.clear();
+    return true;
+}
+
+void trim(std::string& s)
+{
+    auto not_space = [](unsigned char ch) { return !std::isspace(ch); };
+    s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
+    s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
+}
+
+std::string clean_model_string(const std::string& raw)
+{
+    std::string cleaned;
+    cleaned.reserve(raw.size());
+    for (char ch : raw) {
+        if (ch != '\0') cleaned.push_back(ch);
+    }
+    trim(cleaned);
+    return cleaned;
+}
+
+std::optional<std::string> detect_pi_model()
+{
+    const char* override_env = std::getenv(kEnvModelOverride);
+    if (override_env && std::strlen(override_env) > 0) {
+        return std::string(override_env);
+    }
+
+    const std::array<const char*, 2> model_paths = {
+        "/sys/firmware/devicetree/base/model",
+        "/proc/device-tree/model"
+    };
+
+    for (const char* path : model_paths) {
+        std::ifstream f(path, std::ios::binary);
+        if (!f.good()) continue;
+        std::ostringstream ss;
+        ss << f.rdbuf();
+        std::string model = clean_model_string(ss.str());
+        if (!model.empty()) return model;
+    }
+
+    std::ifstream cpuinfo("/proc/cpuinfo");
+    if (cpuinfo.good()) {
+        std::string line;
+        const std::string prefix = "Model\t:";
+        while (std::getline(cpuinfo, line)) {
+            if (line.rfind(prefix, 0) == 0) {
+                std::string model = line.substr(prefix.size());
+                trim(model);
+                if (!model.empty()) return model;
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
+std::optional<int> parse_pi_version(const std::optional<std::string>& model)
+{
+    if (!model || model->empty()) return std::nullopt;
+
+    static const std::regex kVersionRe(
+        R"(Raspberry Pi\s*(?:Model\s*)?(\d+))",
+        std::regex::icase
+    );
+
+    std::smatch match;
+    if (std::regex_search(*model, match, kVersionRe) && match.size() > 1) {
+        try {
+            return std::stoi(match.str(1));
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+
+    return std::nullopt;
+}
+
+std::string to_lower(std::string value)
+{
+    for (char& ch : value) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return value;
+}
+
+std::string select_gpio_library()
+{
+    const char* forced = std::getenv(kEnvForceLib);
+    if (forced && std::strlen(forced) > 0) {
+        return to_lower(forced);
+    }
+
+    auto model = detect_pi_model();
+    auto version = parse_pi_version(model);
+    if (version && *version >= 5) {
+        return "lgpio";
+    }
+    return "pigpio";
+}
+
+bool ensure_backend_loaded()
+{
+    if (g_backend_loaded) return true;
+
+    const char* forced = std::getenv(kEnvForceLib);
+    bool forced_requested = forced && std::strlen(forced) > 0;
+
+    std::string lib = select_gpio_library();
+    if (!load_backend_library(lib)) {
+        if (!forced_requested && lib != "pigpio" && load_backend_library("pigpio")) {
+            g_backend_error =
+                "Aviso: biblioteca '" + lib + "' indisponivel; usando pigpio";
+            return true;
+        }
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+#define PI_INPUT   0
+#define PI_OUTPUT  1
+#define PI_PUD_OFF 0
+#define PI_PUD_DOWN 1
+#define PI_PUD_UP  2
+#define PI_WAVE_MODE_ONE_SHOT 0u
+
+#define gpioInitialise()          (g_backend.gpioInitialise())
+#define gpioTerminate()           (g_backend.gpioTerminate())
+#define gpioSetMode(gpio, mode)   (g_backend.gpioSetMode((gpio), (mode)))
+#define gpioWrite(gpio, level)    (g_backend.gpioWrite((gpio), (level)))
+#define gpioTick()                (g_backend.gpioTick())
+#define gpioDelay(us)             (g_backend.gpioDelay((us)))
+#define gpioWaveAddNew()          (g_backend.gpioWaveAddNew())
+#define gpioWaveAddGeneric(n, p)  (g_backend.gpioWaveAddGeneric((n), (p)))
+#define gpioWaveCreate()          (g_backend.gpioWaveCreate())
+#define gpioWaveTxSend(w, m)      (g_backend.gpioWaveTxSend((w), (m)))
+#define gpioWaveTxBusy()          (g_backend.gpioWaveTxBusy())
+#define gpioWaveDelete(w)         (g_backend.gpioWaveDelete((w)))
+#define gpioSetPullUpDown(g, p)   (g_backend.gpioSetPullUpDown((g), (p)))
+#define gpioSetAlertFunc(g, cb)   (g_backend.gpioSetAlertFunc((g), (cb)))
+#define gpioSetTimerFuncEx(t, i, cb, ud) \
+    (g_backend.gpioSetTimerFuncEx((t), (i), (cb), (ud)))
+#define gpioGlitchFilter(g, l)    (g_backend.gpioGlitchFilter((g), (l)))
 
 // ===================== CONFIG GLOBAIS =====================
 
@@ -607,9 +888,18 @@ int main(int argc, char** argv)
         NEC_LEADER_SPACE_US = 4500;
     }
     
-    gpioCfgInterfaces(PI_DISABLE_SOCK_IF);
+    if (!ensure_backend_loaded()) {
+        std::fprintf(stderr, "%s\n", g_backend_error.c_str());
+        return 1;
+    }
+
+    if (!g_backend_error.empty()) {
+        std::fprintf(stderr, "%s\n", g_backend_error.c_str());
+        g_backend_error.clear();
+    }
+
     if (gpioInitialise() < 0) {
-        std::fprintf(stderr, "pigpio init falhou (precisa sudo)\n");
+        std::fprintf(stderr, "Falha ao inicializar biblioteca GPIO (precisa sudo)\n");
         return 1;
     }
         // caminho one-shot: manda e sai
