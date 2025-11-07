@@ -1,10 +1,13 @@
 # IR Pi Blaster
 
 This repository contains a small utility for sending and receiving NEC/NECx
-infrared frames using a Raspberry Pi and the [pigpio](https://abyz.me.uk/rpi/pigpio/)
-GPIO library. It provides a single binary, `ir_nec_rpi`, that can decode signals
-from a TSOP-style IR receiver and replay them on an IR LED driven directly from
-one of the Pi's PWM-capable GPIO pins.
+infrared frames using a Raspberry Pi. Boards up to and including the Raspberry
+Pi 4 rely on the [pigpio](https://abyz.me.uk/rpi/pigpio/) GPIO library while the
+Raspberry Pi 5 requires the newer `lgpio` bindings. A helper script,
+`rpi_library_selector.py`, is bundled to automatically choose the best
+library for your system. The project provides a single binary, `ir_nec_rpi`, that
+can decode signals from a TSOP-style IR receiver and replay them on an IR LED
+driven directly from one of the Pi's PWM-capable GPIO pins.
 
 ## Requirements
 
@@ -14,17 +17,30 @@ Install the runtime dependencies with pip:
 python -m pip install -r requirements.txt
 ```
 
-In addition you need the pigpio system library and build tooling when compiling
-on Raspberry Pi OS:
+In addition you need the appropriate GPIO system library and build tooling when
+compiling on Raspberry Pi OS. Run the library selector to confirm which backend
+your board requires:
+
+```bash
+python rpi_library_selector.py
+```
+
+On Raspberry Pi 4 and earlier the command prints `pigpio`; on Raspberry Pi 5 it
+prints `lgpio`.
+
+Install the matching system packages:
 
 ```bash
 sudo apt update
+# Raspberry Pi 4 and earlier
 sudo apt install pigpio libpigpio-dev g++ make
+# Raspberry Pi 5
+sudo apt install python3-lgpio lgpio-dev g++ make
 ```
 
-The examples below assume you are running on a Raspberry Pi with
-`pigpiod` stopped (the application links directly to the pigpio C library) and
-you are executing the binary with `sudo` so pigpio can access the hardware.
+The examples below assume you are running on a Raspberry Pi with the
+appropriate GPIO service stopped (`pigpiod` when using pigpio) and you are
+executing the binary with `sudo` so the library can access the hardware.
 
 ## Building
 
