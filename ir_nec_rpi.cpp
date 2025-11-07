@@ -195,6 +195,7 @@ bool load_backend_library(const std::string& lib_name_input)
     return true;
 }
 
+std::string select_gpio_library();
 
 bool ensure_backend_loaded()
 {
@@ -901,5 +902,6 @@ int main(int argc, char** argv)
     gpioTerminate();
     return 0;
 }
+
 
 
