@@ -1,1 +1,2 @@
 pigpio>=1.78
+# The Raspberry Pi 5 uses the system-provided python3-lgpio package instead of pigpio.
