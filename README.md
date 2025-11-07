@@ -2,35 +2,38 @@
 
 This repository contains a small utility for sending and receiving NEC/NECx
 infrared frames using a Raspberry Pi. Boards up to and including the Raspberry
-Pi 4 rely on the [pigpio](https://abyz.me.uk/rpi/pigpio/) GPIO library while the
-Raspberry Pi 5 requires the newer `lgpio` bindings. A helper script,
-`rpi_library_selector.py`, is bundled to automatically choose the best
-library for your system. The same detection logic is embedded in the
-`ir_nec_rpi` binary, allowing it to load the appropriate backend at runtime.
+Pi 4 typically rely on the [pigpio](https://abyz.me.uk/rpi/pigpio/) GPIO
+library while the Raspberry Pi 5 ships with the newer `lgpio` bindings. A
+helper script, `rpi_library_selector.py`, is bundled to automatically choose the
+best library for your system. The selector prefers the recommended backend for
+the detected Raspberry Pi generation but will gracefully fall back to any other
+supported library that is already installed. The same detection logic is
+embedded in the `ir_nec_rpi` binary, allowing it to load the appropriate
+backend at runtime.
 The project provides a single binary, `ir_nec_rpi`, that
 can decode signals from a TSOP-style IR receiver and replay them on an IR LED
 driven directly from one of the Pi's PWM-capable GPIO pins.
 
 ## Requirements
 
-Install the runtime dependencies with pip:
+Install the Python runtime dependencies with pip:
 
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-In addition you need the appropriate GPIO system library and build tooling when
-compiling on Raspberry Pi OS. Run the library selector to confirm which backend
-your board requires:
+Hardware-specific GPIO bindings are provided by the operating system packages,
+so install the variant that matches your board. Run the library selector to
+confirm which backend your system will use:
 
 ```bash
 python rpi_library_selector.py
 ```
 
-On Raspberry Pi 4 and earlier the command prints `pigpio`; on Raspberry Pi 5 it
-prints `lgpio`.
-
-Install the matching system packages:
+When the preferred library is not available the selector automatically chooses
+another supported backend that is already installed. For example, on Raspberry
+Pi 4 and earlier the command normally prints `pigpio`; on Raspberry Pi 5 it
+prints `lgpio`. Install the matching system packages:
 
 ```bash
 sudo apt update

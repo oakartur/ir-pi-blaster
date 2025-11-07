@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import importlib.util
 import os
 import re
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 _MODEL_PATHS = (
     Path("/sys/firmware/devicetree/base/model"),
@@ -53,7 +54,8 @@ def detect_pi_model() -> Optional[str]:
     return None
 
 
-_VERSION_RE = re.compile(r"Raspberry Pi\s*(?:Model\s*)?(?P<version>\d+)", re.IGNORECASE)
+_VERSION_RE = re.compile(r"Raspberry Pi[^0-9]*(?P<version>\d+)", re.IGNORECASE)
+_SUPPORTED_LIBRARIES: Tuple[str, ...] = ("pigpio", "lgpio")
 
 
 def parse_pi_version(model: Optional[str]) -> Optional[int]:
@@ -71,10 +73,88 @@ def parse_pi_version(model: Optional[str]) -> Optional[int]:
     return None
 
 
+def _detect_available_libraries() -> List[str]:
+    """Return the supported GPIO libraries that are importable on this host."""
+
+    available: List[str] = []
+    for lib in _SUPPORTED_LIBRARIES:
+        try:
+            spec = importlib.util.find_spec(lib)
+        except (ImportError, ValueError):
+            spec = None
+        if spec is not None:
+            available.append(lib)
+    return available
+
+
+def _order_candidates(version: Optional[int]) -> List[str]:
+    """Return the library preference order for the detected Pi version."""
+
+    order: List[str] = []
+    if version and version >= 5:
+        order.extend(["lgpio", "pigpio"])
+    else:
+        order.extend(["pigpio", "lgpio"])
+
+    # Make sure any remaining supported libraries are appended to the order so
+    # future additions still appear in the result.
+    for lib in _SUPPORTED_LIBRARIES:
+        if lib not in order:
+            order.append(lib)
+    return order
+
+
+def _select_from_candidates(
+    candidates: Iterable[str],
+    *, available: Iterable[str],
+    require_installed: bool,
+) -> Optional[str]:
+    """Return the first candidate present in *available* or the first fallback.
+
+    When *require_installed* is ``True`` a selection is only returned if a
+    candidate is installed. Otherwise the first candidate is returned even if
+    none are importable. This behaviour matches the historical implementation
+    which always preferred pigpio unless the Pi 5 heuristic kicked in.
+    """
+
+    available_set = {lib.lower() for lib in available}
+    first_candidate: Optional[str] = None
+    for name in candidates:
+        name = name.lower()
+        if first_candidate is None:
+            first_candidate = name
+        if name in available_set:
+            return name
+
+    if require_installed:
+        return None
+    return first_candidate
+
+
 def select_gpio_library(
-    *, model: Optional[str] = None, version: Optional[int] = None
+    *,
+    model: Optional[str] = None,
+    version: Optional[int] = None,
+    installed_only: bool = False,
 ) -> str:
-    """Return the preferred GPIO library name for the detected Raspberry Pi."""
+    """Return the preferred GPIO library name for the detected Raspberry Pi.
+
+    Parameters
+    ----------
+    model:
+        Override the detected Raspberry Pi model string. ``None`` triggers
+        automatic detection.
+    version:
+        Override the Raspberry Pi major version number. ``None`` triggers
+        parsing of the ``model`` string.
+    installed_only:
+        When ``True`` the function will raise a :class:`RuntimeError` if none of
+        the supported libraries are importable. When ``False`` (the default)
+        the first candidate will be returned even if it is not currently
+        installed, preserving backwards compatibility with callers that expect
+        to handle import errors separately.
+    """
+
     forced = os.environ.get(_ENV_FORCE_LIB)
     if forced:
         return forced.strip().lower()
@@ -84,10 +164,20 @@ def select_gpio_library(
     if version is None:
         version = parse_pi_version(model)
 
-    if version and version >= 5:
-        return "lgpio"
+    candidates = _order_candidates(version)
+    available = _detect_available_libraries()
+    selected = _select_from_candidates(
+        candidates,
+        available=available,
+        require_installed=installed_only,
+    )
 
-    return "pigpio"
+    if selected is None:
+        raise RuntimeError(
+            "No supported GPIO libraries are installed. Install pigpio or lgpio"
+        )
+
+    return selected
 
 
 def load_gpio_library(
@@ -100,7 +190,11 @@ def load_gpio_library(
     not installed on the current system.
     """
 
-    lib_name = select_gpio_library(model=model, version=version)
+    lib_name = select_gpio_library(
+        model=model,
+        version=version,
+        installed_only=True,
+    )
     module = importlib.import_module(lib_name)
     return lib_name, module
 
@@ -144,7 +238,10 @@ def main() -> int:
     print(lib)
 
     if args.load:
-        lib_name, module = load_gpio_library(model=model, version=version)
+        try:
+            lib_name, module = load_gpio_library(model=model, version=version)
+        except (ImportError, RuntimeError) as exc:
+            parser.error(str(exc))
         module_path = getattr(module, "__file__", None)
         if module_path:
             print(module_path)
