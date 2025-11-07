@@ -5,7 +5,9 @@ infrared frames using a Raspberry Pi. Boards up to and including the Raspberry
 Pi 4 rely on the [pigpio](https://abyz.me.uk/rpi/pigpio/) GPIO library while the
 Raspberry Pi 5 requires the newer `lgpio` bindings. A helper script,
 `rpi_library_selector.py`, is bundled to automatically choose the best
-library for your system. The project provides a single binary, `ir_nec_rpi`, that
+library for your system. The same detection logic is embedded in the
+`ir_nec_rpi` binary, allowing it to load the appropriate backend at runtime.
+The project provides a single binary, `ir_nec_rpi`, that
 can decode signals from a TSOP-style IR receiver and replay them on an IR LED
 driven directly from one of the Pi's PWM-capable GPIO pins.
 
@@ -47,11 +49,13 @@ executing the binary with `sudo` so the library can access the hardware.
 Compile the receiver/transmitter with g++:
 
 ```bash
-g++ -std=gnu++17 ir_nec_rpi.cpp -lpigpio -lpthread -O2 -o ir_nec_rpi
+g++ -std=gnu++17 ir_nec_rpi.cpp -ldl -lpthread -O2 -o ir_nec_rpi
 ```
 
-This produces the `ir_nec_rpi` executable in the project root. Ensure that
-`libpigpio` is available on the system before running the binary.
+This produces the `ir_nec_rpi` executable in the project root. The program
+automatically loads either `libpigpio` or `liblgpio` at runtime based on the
+detected Raspberry Pi model, so the appropriate system library must be
+installed before running the binary.
 
 ## Usage
 
