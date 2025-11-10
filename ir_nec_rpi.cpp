@@ -46,10 +46,22 @@ struct BackendApi {
     std::string resolved_name;
 
     // --- Funções pigpio ---
-    int  (*gpioInitialise)(void) = nullptr;
-    void (*gpioTerminate)(void)  = nullptr;
-    int  (*gpioSetMode)(unsigned, unsigned) = nullptr;
-    int  (*gpioWrite)(unsigned, unsigned) = nullptr;
+    int       (*gpioInitialise)(void) = nullptr;
+    void      (*gpioTerminate)(void)  = nullptr;
+    int       (*gpioSetMode)(unsigned, unsigned) = nullptr;
+    int       (*gpioWrite)(unsigned, unsigned) = nullptr;
+    uint32_t  (*gpioTick)(void) = nullptr;
+    void      (*gpioDelay)(unsigned) = nullptr;
+    int       (*gpioWaveAddNew)(void) = nullptr;
+    int       (*gpioWaveAddGeneric)(unsigned, gpioPulse_t*) = nullptr;
+    int       (*gpioWaveCreate)(void) = nullptr;
+    int       (*gpioWaveTxSend)(unsigned, unsigned) = nullptr;
+    int       (*gpioWaveTxBusy)(void) = nullptr;
+    int       (*gpioWaveDelete)(unsigned) = nullptr;
+    int       (*gpioSetPullUpDown)(unsigned, unsigned) = nullptr;
+    int       (*gpioSetAlertFunc)(unsigned, gpioAlertFunc_t) = nullptr;
+    int       (*gpioSetTimerFuncEx)(unsigned, unsigned, gpioTimerFuncEx_t, void*) = nullptr;
+    int       (*gpioGlitchFilter)(unsigned, unsigned) = nullptr;
 
     // --- Funções lgpio ---
     int  (*lgGpiochipOpen)(unsigned) = nullptr;
@@ -218,12 +230,26 @@ bool load_backend_library(const std::string& lib_name_input)
 
     // tenta pigpio primeiro
     if (load_symbol(g_backend.handle, g_backend.gpioInitialise, "gpioInitialise", g_backend_error)) {
-        require(g_backend.gpioTerminate, "gpioTerminate");
-        require(g_backend.gpioSetMode, "gpioSetMode");
-        require(g_backend.gpioWrite, "gpioWrite");
+        if (!require(g_backend.gpioTerminate,      "gpioTerminate"))      return false;
+        if (!require(g_backend.gpioSetMode,        "gpioSetMode"))        return false;
+        if (!require(g_backend.gpioWrite,          "gpioWrite"))          return false;
+        if (!require(g_backend.gpioTick,           "gpioTick"))           return false;
+        if (!require(g_backend.gpioDelay,          "gpioDelay"))          return false;
+        if (!require(g_backend.gpioWaveAddNew,     "gpioWaveAddNew"))     return false;
+        if (!require(g_backend.gpioWaveAddGeneric, "gpioWaveAddGeneric")) return false;
+        if (!require(g_backend.gpioWaveCreate,     "gpioWaveCreate"))     return false;
+        if (!require(g_backend.gpioWaveTxSend,     "gpioWaveTxSend"))     return false;
+        if (!require(g_backend.gpioWaveTxBusy,     "gpioWaveTxBusy"))     return false;
+        if (!require(g_backend.gpioWaveDelete,     "gpioWaveDelete"))     return false;
+        if (!require(g_backend.gpioSetPullUpDown,  "gpioSetPullUpDown"))  return false;
+        if (!require(g_backend.gpioSetAlertFunc,   "gpioSetAlertFunc"))   return false;
+        if (!require(g_backend.gpioSetTimerFuncEx, "gpioSetTimerFuncEx")) return false;
+        if (!require(g_backend.gpioGlitchFilter,   "gpioGlitchFilter"))   return false;
         g_backend.is_lgpio = false;
         loaded_any = true;
-    } else if (load_symbol(g_backend.handle, g_backend.lgGpiochipOpen, "lgGpiochipOpen", g_backend_error)) {
+    }
+    // se não era pigpio, tenta API lgpio (OBS: não há equivalentes aos wave/alert pigpio)
+    else if (load_symbol(g_backend.handle, g_backend.lgGpiochipOpen, "lgGpiochipOpen", g_backend_error)) {
         require(g_backend.lgGpiochipClose, "lgGpiochipClose");
         require(g_backend.lgGpioClaimOutput, "lgGpioClaimOutput");
         require(g_backend.lgGpioWrite, "lgGpioWrite");
@@ -281,10 +307,6 @@ std::string select_gpio_library()
     if (forced && std::strlen(forced) > 0)
         return to_lower(forced);
 
-    auto model = detect_pi_model();
-    auto version = parse_pi_version(model);
-    if (version && *version >= 5)
-        return "lgpio";
     return "pigpio";
 }
 
@@ -1042,6 +1064,7 @@ int main(int argc, char** argv)
     gpioTerminate();
     return 0;
 }
+
 
 
 
