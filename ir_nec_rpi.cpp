@@ -73,6 +73,10 @@ static void unload_backend();
 template <typename T>
 static bool load_symbol(void* handle, T& fn, const char* name, std::string& err);
 
+template <typename T>
+static bool load_symbol_with_candidates(
+    void* handle, T& fn, const std::vector<std::string>& names, std::string& err);
+
 // ---- helpers ----
 static inline std::string to_lower(const std::string& s) {
     std::string out = s;
@@ -172,17 +176,46 @@ bool load_backend_library(const std::string& lib_name_input)
         return false;
     }
 
+    const bool treat_as_pgpio =
+        lib_name.find("pgpio") != std::string::npos ||
+        g_backend.resolved_name.find("pgpio") != std::string::npos;
+
+    auto symbol_candidates = [&](const char* base) {
+        std::vector<std::string> names;
+        names.emplace_back(base);
+        if (treat_as_pgpio) {
+            std::string base_str(base);
+            names.emplace_back("p" + base_str);
+            if (base_str.rfind("gpio", 0) == 0) {
+                std::string suffix = base_str.substr(4);
+                names.emplace_back("pg" + suffix);
+                names.emplace_back("pgpio" + suffix);
+            }
+        }
+        std::sort(names.begin(), names.end());
+        names.erase(std::unique(names.begin(), names.end()), names.end());
+        return names;
+    };
+
     auto require = [&](auto& fn, const char* symbol) {
-        if (!load_symbol(g_backend.handle, fn, symbol, g_backend_error)) {
-            std::fprintf(stderr, "[GPIO] Falha ao resolver símbolo %s em %s\n",
-                         symbol, g_backend.resolved_name.c_str());
+        auto candidates = symbol_candidates(symbol);
+        if (!load_symbol_with_candidates(g_backend.handle, fn, candidates, g_backend_error)) {
+            std::ostringstream oss;
+            oss << "[GPIO] Falha ao resolver símbolo " << symbol << " em "
+                << g_backend.resolved_name;
+            if (!candidates.empty()) {
+                oss << " (tentativas:";
+                for (const auto& name : candidates) oss << ' ' << name;
+                oss << ')';
+            }
+            std::fprintf(stderr, "%s\n", oss.str().c_str());
             unload_backend();
             return false;
         }
         return true;
     };
 
-    // tenta carregar símbolos pigpio
+    // tenta carregar símbolos pigpio/pgpio
     if (!require(g_backend.gpioInitialise,    "gpioInitialise")) return false;
     if (!require(g_backend.gpioTerminate,     "gpioTerminate"))  return false;
     if (!require(g_backend.gpioSetMode,       "gpioSetMode"))    return false;
@@ -240,6 +273,37 @@ static bool load_symbol(void* handle, T& fn, const char* name, std::string& err)
         return false;
     }
     return true;
+}
+
+template<typename T>
+static bool load_symbol_with_candidates(
+    void* handle, T& fn, const std::vector<std::string>& names, std::string& err)
+{
+    std::string last_error;
+    for (const auto& name : names) {
+        dlerror();
+        fn = reinterpret_cast<T>(dlsym(handle, name.c_str()));
+        if (fn) {
+            err.clear();
+            return true;
+        }
+        if (const char* e = dlerror()) {
+            last_error.assign(e);
+        } else {
+            last_error.clear();
+        }
+    }
+
+    std::ostringstream oss;
+    oss << "Símbolo ausente:";
+    for (const auto& name : names) {
+        oss << ' ' << name;
+    }
+    if (!last_error.empty()) {
+        oss << " (" << last_error << ")";
+    }
+    err = oss.str();
+    return false;
 }
 
 static bool ensure_backend_loaded()
