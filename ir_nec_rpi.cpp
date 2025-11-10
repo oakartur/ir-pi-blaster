@@ -1123,7 +1123,7 @@ int main(int argc, char** argv)
         // caminho one-shot: manda e sai
     if (g_mode == MODE_TX_ONESHOT) {
         int rc = tx_once_and_exit();
-        gpioTerminate();
+        gpio_backend_close();
         return rc;
     }
 
@@ -1169,6 +1169,7 @@ int main(int argc, char** argv)
     gpio_backend_close();
     return 0;
 }
+
 
 
 
