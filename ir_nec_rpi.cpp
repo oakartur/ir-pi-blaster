@@ -324,7 +324,7 @@ std::string select_gpio_library()
     }
 
     // Para modelos anteriores, usar pigpio
-    return "pigpio";,
+    return "pigpio";
 }
 
 // ===================== Backend loader utils =====================
@@ -1081,6 +1081,7 @@ int main(int argc, char** argv)
     gpioTerminate();
     return 0;
 }
+
 
 
 
