@@ -45,22 +45,21 @@ struct BackendApi {
     void* handle = nullptr;
     std::string resolved_name;
 
+    // --- Funções pigpio ---
     int  (*gpioInitialise)(void) = nullptr;
     void (*gpioTerminate)(void)  = nullptr;
     int  (*gpioSetMode)(unsigned, unsigned) = nullptr;
     int  (*gpioWrite)(unsigned, unsigned) = nullptr;
-    uint32_t (*gpioTick)(void) = nullptr;
-    void (*gpioDelay)(unsigned) = nullptr;
-    int  (*gpioWaveAddNew)(void) = nullptr;
-    int  (*gpioWaveAddGeneric)(unsigned, gpioPulse_t*) = nullptr;
-    int  (*gpioWaveCreate)(void) = nullptr;
-    int  (*gpioWaveTxSend)(unsigned, unsigned) = nullptr;
-    int  (*gpioWaveTxBusy)(void) = nullptr;
-    int  (*gpioWaveDelete)(unsigned) = nullptr;
-    int  (*gpioSetPullUpDown)(unsigned, unsigned) = nullptr;
-    int  (*gpioSetAlertFunc)(unsigned, gpioAlertFunc_t) = nullptr;
-    int  (*gpioSetTimerFuncEx)(unsigned, unsigned, gpioTimerFuncEx_t, void*) = nullptr;
-    int  (*gpioGlitchFilter)(unsigned, unsigned) = nullptr;
+
+    // --- Funções lgpio ---
+    int  (*lgGpiochipOpen)(unsigned) = nullptr;
+    int  (*lgGpiochipClose)(int) = nullptr;
+    int  (*lgGpioClaimOutput)(int, unsigned, unsigned, unsigned) = nullptr;
+    int  (*lgGpioWrite)(int, unsigned, unsigned) = nullptr;
+
+    // estado interno
+    bool is_lgpio = false;
+    int chip_handle = -1;
 };
 
 static BackendApi g_backend;
@@ -215,27 +214,65 @@ bool load_backend_library(const std::string& lib_name_input)
         return true;
     };
 
-    // tenta carregar símbolos pigpio/pgpio
-    if (!require(g_backend.gpioInitialise,    "gpioInitialise")) return false;
-    if (!require(g_backend.gpioTerminate,     "gpioTerminate"))  return false;
-    if (!require(g_backend.gpioSetMode,       "gpioSetMode"))    return false;
-    if (!require(g_backend.gpioWrite,         "gpioWrite"))      return false;
-    if (!require(g_backend.gpioTick,          "gpioTick"))       return false;
-    if (!require(g_backend.gpioDelay,         "gpioDelay"))      return false;
-    if (!require(g_backend.gpioWaveAddNew,    "gpioWaveAddNew")) return false;
-    if (!require(g_backend.gpioWaveAddGeneric,"gpioWaveAddGeneric")) return false;
-    if (!require(g_backend.gpioWaveCreate,    "gpioWaveCreate")) return false;
-    if (!require(g_backend.gpioWaveTxSend,    "gpioWaveTxSend")) return false;
-    if (!require(g_backend.gpioWaveTxBusy,    "gpioWaveTxBusy")) return false;
-    if (!require(g_backend.gpioWaveDelete,    "gpioWaveDelete")) return false;
-    if (!require(g_backend.gpioSetPullUpDown, "gpioSetPullUpDown")) return false;
-    if (!require(g_backend.gpioSetAlertFunc,  "gpioSetAlertFunc"))  return false;
-    if (!require(g_backend.gpioSetTimerFuncEx,"gpioSetTimerFuncEx")) return false;
-    if (!require(g_backend.gpioGlitchFilter,  "gpioGlitchFilter"))  return false;
+    bool loaded_any = false;
+
+    // tenta pigpio primeiro
+    if (load_symbol(g_backend.handle, g_backend.gpioInitialise, "gpioInitialise", g_backend_error)) {
+        require(g_backend.gpioTerminate, "gpioTerminate");
+        require(g_backend.gpioSetMode, "gpioSetMode");
+        require(g_backend.gpioWrite, "gpioWrite");
+        g_backend.is_lgpio = false;
+        loaded_any = true;
+    } else if (load_symbol(g_backend.handle, g_backend.lgGpiochipOpen, "lgGpiochipOpen", g_backend_error)) {
+        require(g_backend.lgGpiochipClose, "lgGpiochipClose");
+        require(g_backend.lgGpioClaimOutput, "lgGpioClaimOutput");
+        require(g_backend.lgGpioWrite, "lgGpioWrite");
+        g_backend.is_lgpio = true;
+        loaded_any = true;
+    }
+
+    if (!loaded_any) {
+        g_backend_error = "Nenhuma API GPIO compatível encontrada em " + g_backend.resolved_name;
+        unload_backend();
+        return false;
+    }
 
     g_backend_loaded = true;
     g_backend_error.clear();
     return true;
+}
+
+
+// --- Abstrações unificadas ---
+
+static bool gpio_backend_init()
+{
+    if (g_backend.is_lgpio) {
+        g_backend.chip_handle = g_backend.lgGpiochipOpen(0);
+        return (g_backend.chip_handle >= 0);
+    } else {
+        return g_backend.gpioInitialise && (g_backend.gpioInitialise() >= 0);
+    }
+}
+
+static void gpio_backend_close()
+{
+    if (g_backend.is_lgpio) {
+        if (g_backend.chip_handle >= 0) g_backend.lgGpiochipClose(g_backend.chip_handle);
+        g_backend.chip_handle = -1;
+    } else if (g_backend.gpioTerminate) {
+        g_backend.gpioTerminate();
+    }
+}
+
+static bool gpio_backend_write(unsigned pin, unsigned value)
+{
+    if (g_backend.is_lgpio) {
+        if (g_backend.chip_handle < 0) return false;
+        return g_backend.lgGpioWrite(g_backend.chip_handle, pin, value) == 0;
+    } else {
+        return g_backend.gpioWrite && (g_backend.gpioWrite(pin, value) == 0);
+    }
 }
 
 std::string select_gpio_library()
@@ -1005,6 +1042,7 @@ int main(int argc, char** argv)
     gpioTerminate();
     return 0;
 }
+
 
 
 
