@@ -548,7 +548,89 @@ static bool load_map_payload(const std::string& path, const std::string& key, ui
     return false;
 }
 // ===================== TX once =====================
+// Helpers específicos para backend lgpio (bit-banging)
+static void lgpio_busy_sleep_us(unsigned us)
+{
+    auto start = std::chrono::high_resolution_clock::now();
+    while (true) {
+        auto now = std::chrono::high_resolution_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - start).count();
+        if ((unsigned)elapsed >= us) break;
+    }
+}
+
+static void lgpio_emit_carrier(unsigned gpio, unsigned mark_us)
+{
+    const unsigned period_us = (unsigned)(1'000'000.0 / CARRIER_HZ + 0.5);
+    const unsigned on_us  = (unsigned)(period_us * DUTY_FRACTION + 0.5);
+    unsigned remaining = mark_us;
+
+    while (remaining > period_us) {
+        g_backend.lgGpioWrite(g_backend.chip_handle, gpio, 1);
+        lgpio_busy_sleep_us(on_us);
+        g_backend.lgGpioWrite(g_backend.chip_handle, gpio, 0);
+        lgpio_busy_sleep_us(period_us - on_us);
+        remaining -= period_us;
+    }
+    if (remaining > 0) {
+        unsigned on_last = std::min(on_us, remaining);
+       g_backend.lgGpioWrite(g_backend.chip_handle, gpio, 1);
+        lgpio_busy_sleep_us(on_last);
+        g_backend.lgGpioWrite(g_backend.chip_handle, gpio, 0);
+        if (remaining > on_last)
+            lgpio_busy_sleep_us(remaining - on_last);
+    }
+}
+
+static void lgpio_emit_space(unsigned gpio, unsigned space_us)
+{
+    (void)gpio;
+    // manter nível baixo durante o espaço
+    lgpio_busy_sleep_us(space_us);
+}
+
 static int tx_once_and_exit(){
+    // Caminho dedicado para backend lgpio (Raspberry Pi 5)
+    if (g_backend.is_lgpio) {
+        if (g_backend.chip_handle < 0) {
+            std::fprintf(stderr, "lgpio: chip_handle invalido\n");
+            return 1;
+        }
+        if (!g_backend.lgGpioClaimOutput || !g_backend.lgGpioWrite) {
+            std::fprintf(stderr, "lgpio: funcoes obrigatorias nao carregadas\n");
+            return 1;
+        }
+        if (g_backend.lgGpioClaimOutput(g_backend.chip_handle, 0, GPIO_TX, 0) != 0) {
+            std::fprintf(stderr, "lgpio: falha ao configurar GPIO %d como saida\n", GPIO_TX);
+            return 1;
+        }
+
+        auto emit_byte_lsbf = [&](uint8_t b) {
+            for (int i = 0; i < 8; ++i) {
+                lgpio_emit_carrier(GPIO_TX, NEC_MARK_US);
+                lgpio_emit_space  (GPIO_TX, ((b >> i) & 0x1) ? NEC_SPACE_1_US : NEC_SPACE_0_US);
+            }
+        };
+
+        // Leader
+        lgpio_emit_carrier(GPIO_TX, NEC_LEADER_MARK_US);
+        lgpio_emit_space  (GPIO_TX, NEC_LEADER_SPACE_US);
+
+        // Dados NECx
+        emit_byte_lsbf((uint8_t)(NECX_ADDR16 & 0xFF));
+        emit_byte_lsbf((uint8_t)((NECX_ADDR16 >> 8) & 0xFF));
+        emit_byte_lsbf(NECX_CMD);
+        emit_byte_lsbf((uint8_t)~NECX_CMD);
+
+        // Trailer + idle
+        lgpio_emit_carrier(GPIO_TX, NEC_MARK_US);
+        lgpio_emit_space  (GPIO_TX, INTERFRAME_GAP_US);
+
+        std::printf("TX ONE-SHOT (lgpio) concluido no GPIO %d.\n", GPIO_TX);
+        return 0;
+    }
+
+    // Caminho original pigpio (waveform)
     gpioSetMode(GPIO_TX, PI_OUTPUT);
     gpioWrite(GPIO_TX, 0);
 
@@ -1034,8 +1116,8 @@ int main(int argc, char** argv)
         g_backend_error.clear();
     }
 
-    if (gpioInitialise() < 0) {
-        std::fprintf(stderr, "Falha ao inicializar biblioteca GPIO (precisa sudo)\n");
+    if (!gpio_backend_init()) {
+        std::fprintf(stderr, "Falha ao inicializar backend GPIO (precisa sudo ou backend suportado)\n");
         return 1;
     }
         // caminho one-shot: manda e sai
@@ -1049,7 +1131,7 @@ int main(int argc, char** argv)
     std::signal(SIGTERM, on_sigint);
 
     // RX (somente quando escolhido)
-    if (g_mode == MODE_ALL || g_mode == MODE_RX) {
+    if (!g_backend.is_lgpio && (g_mode == MODE_ALL || g_mode == MODE_RX)) {
         // zera estado RX
         {
             std::lock_guard<std::mutex> lk(g_mtx);
@@ -1066,21 +1148,28 @@ int main(int argc, char** argv)
 
     // TX (somente quando escolhido)
     std::thread th_tx;
-    if (g_mode == MODE_ALL || g_mode == MODE_TX) {
-       button_start(); 
-       th_tx = std::thread(tx_thread);
+    if (!g_backend.is_lgpio && (g_mode == MODE_ALL || g_mode == MODE_TX)) {
+        button_start();
+        th_tx = std::thread(tx_thread);
+    } else if (g_backend.is_lgpio && (g_mode == MODE_ALL || g_mode == MODE_TX)) {
+        std::fprintf(stderr, "Modo TX/ALL ainda nao suportado com backend lgpio (somente --command / one-shot).\n");
+        gpio_backend_close();
+        return 1;
     }
+
 
     // Loop principal ocioso
     while (g_running.load()) std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     if (th_tx.joinable()) th_tx.join();
-    // desarma timer, callback e finaliza pigpio
-    gpioSetTimerFuncEx(0, 0, nullptr, nullptr);
-    gpioSetAlertFunc(GPIO_RX, nullptr);
-    gpioTerminate();
+    if (!g_backend.is_lgpio) {
+        gpioSetTimerFuncEx(0, 0, nullptr, nullptr);
+        gpioSetAlertFunc(GPIO_RX, nullptr);
+    }
+    gpio_backend_close();
     return 0;
 }
+
 
 
 
