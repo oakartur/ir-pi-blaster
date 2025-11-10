@@ -307,7 +307,24 @@ std::string select_gpio_library()
     if (forced && std::strlen(forced) > 0)
         return to_lower(forced);
 
-    return "pigpio";
+    // Detectar modelo do Raspberry Pi
+    auto model_opt = detect_pi_model();
+    if (model_opt) {
+        std::string model = *model_opt;
+        std::fprintf(stderr, "[GPIO] Modelo detectado: %s\n", model.c_str());
+
+        // Se for Raspberry Pi 5, usar lgpio
+        if (model.find("Raspberry Pi 5") != std::string::npos ||
+            model.find("Raspberry Pi 5 Model") != std::string::npos) {
+            std::fprintf(stderr, "[GPIO] Raspberry Pi 5 detectado -> usando lgpio\n");
+            return "lgpio";
+        }
+    } else {
+        std::fprintf(stderr, "[GPIO] Nao foi possivel detectar o modelo. Assumindo pigpio.\n");
+    }
+
+    // Para modelos anteriores, usar pigpio
+    return "pigpio";,
 }
 
 // ===================== Backend loader utils =====================
@@ -1064,6 +1081,7 @@ int main(int argc, char** argv)
     gpioTerminate();
     return 0;
 }
+
 
 
 
